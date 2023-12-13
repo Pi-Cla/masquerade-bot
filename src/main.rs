@@ -16,11 +16,6 @@ pub use error::Error;
 use models::{Author, Profile};
 use profiles::EditCommand;
 
-pub enum RoleReact {
-    React,
-    Unreact,
-}
-
 struct Bot {
     http: Http,
     cache: Cache,
@@ -250,7 +245,6 @@ impl Bot {
         message_id: &str,
         user_id: &str,
         emoji_id: &str,
-        _action: RoleReact,
     ) -> Result<(), Error> {
         let message = self
             .cache
@@ -332,10 +326,7 @@ impl RawHandler for Bot {
         user_id: String,
         emoji_id: String,
     ) {
-        if let Err(e) = self
-            .on_react(&channel_id, &id, &user_id, &emoji_id, RoleReact::React)
-            .await
-        {
+        if let Err(e) = self.on_react(&channel_id, &id, &user_id, &emoji_id).await {
             self.on_react_error(e).await;
         }
     }
@@ -347,10 +338,7 @@ impl RawHandler for Bot {
         user_id: String,
         emoji_id: String,
     ) {
-        if let Err(e) = self
-            .on_react(&channel_id, &id, &user_id, &emoji_id, RoleReact::Unreact)
-            .await
-        {
+        if let Err(e) = self.on_react(&channel_id, &id, &user_id, &emoji_id).await {
             self.on_react_error(e).await;
         }
     }

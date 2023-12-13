@@ -27,7 +27,7 @@ pub struct Profile {
     pub display_name: Option<String>,
     #[validate(
         length(min = 1, message = "cannot be empty"),
-        length(max = 128, message = "must be <= 128 characters"),
+        length(max = 256, message = "must be <= 256 characters"),
         url(message = "isn't a valid url")
     )]
     pub avatar: Option<String>,

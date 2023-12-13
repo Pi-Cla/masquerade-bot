@@ -1,0 +1,410 @@
+use std::{collections::HashMap, sync::Arc};
+use tokio::join;
+
+use volty::{http::routes::users::user_edit::UserEdit, prelude::*};
+
+mod constants;
+mod database;
+mod error;
+mod listing;
+mod models;
+mod profiles;
+
+use constants::HELP_MESSAGE;
+use database::DB;
+pub use error::Error;
+use models::{Author, Profile};
+use profiles::EditCommand;
+
+pub enum RoleReact {
+    React,
+    Unreact,
+}
+
+struct Bot {
+    http: Http,
+    cache: Cache,
+
+    db: DB,
+}
+
+impl Bot {
+    async fn check_profile(
+        &self,
+        channel_id: &str,
+        user_id: &str,
+        profile: &mut Profile,
+    ) -> Result<(), Error> {
+        let bot_permissions = self
+            .cache
+            .fetch_channel_permissions(&self.http, channel_id, self.cache.user_id())
+            .await?;
+        if !bot_permissions.has(Permission::Masquerade) {
+            return Err(Error::BotMissing(Permission::Masquerade));
+        }
+        if !bot_permissions.has(Permission::ManageRole) {
+            profile.colour = None;
+        }
+
+        let user_permissions = self
+            .cache
+            .fetch_channel_permissions(&self.http, channel_id, user_id)
+            .await?;
+        if !user_permissions.has(Permission::Masquerade) {
+            return Err(Error::UserMissing(Permission::Masquerade));
+        }
+        Ok(())
+    }
+
+    async fn send_masq(
+        &self,
+        author_id: &str,
+        channel_id: &str,
+        sendable: SendableMessage,
+    ) -> Result<Message, Error> {
+        let message = self.http.send_message(channel_id, sendable).await?;
+        self.db
+            .set_author(Author {
+                message_id: message.id.clone(),
+                user_id: author_id.to_string(),
+            })
+            .await?;
+        Ok(message)
+    }
+
+    async fn extract_masq_message(
+        &self,
+        message: &Message,
+    ) -> Result<Option<SendableMessage>, Error> {
+        let Some(content) = &message.content else {
+            return Ok(None);
+        };
+        let Some((name, rest)) = content.split_once(';').map(|(n, r)| (n, r.trim_start())) else {
+            return Ok(None);
+        };
+        let Some(mut profile) = self.db.get_profile(&message.author_id, name).await else {
+            return Ok(None);
+        };
+
+        self.check_profile(&message.channel_id, &message.author_id, &mut profile)
+            .await?;
+
+        let send = SendableMessage::new()
+            .content(rest)
+            .masquerade(profile)
+            .replies(message.replies.clone().unwrap_or_default());
+        Ok(Some(send))
+    }
+
+    async fn on_message(&self, message: &Message) -> Result<(), Error> {
+        if message.author_id == self.cache.user_id() {
+            return Ok(());
+        }
+
+        if let Some(send) = self.extract_masq_message(message).await? {
+            let send = self.send_masq(&message.author_id, &message.channel_id, send);
+            let delete = async {
+                if let Ok(permissions) = self
+                    .cache
+                    .fetch_channel_permissions(
+                        &self.http,
+                        &message.channel_id,
+                        self.cache.user_id(),
+                    )
+                    .await
+                {
+                    if permissions.has(Permission::ManageMessages) {
+                        let _ = self
+                            .http
+                            .delete_message(&message.channel_id, &message.id)
+                            .await;
+                    }
+                }
+            };
+            let (_, _) = join!(send, delete);
+            return Ok(());
+        }
+
+        let Some(stripped) = message
+            .content
+            .as_ref()
+            .and_then(|c| c.strip_prefix(self.cache.user_mention()))
+            .map(|s| s.trim())
+        else {
+            return Ok(());
+        };
+        let user = self
+            .cache
+            .fetch_user(&self.http, &message.author_id)
+            .await?;
+        if user.bot.is_some() {
+            return Ok(());
+        }
+
+        let (command, rest) = stripped
+            .split_once(|c: char| c.is_whitespace())
+            .map(|(c, r)| (c, r.trim_start()))
+            .unwrap_or((stripped, ""));
+        match command {
+            "create" => {
+                self.create_profile(message, rest).await?;
+            }
+            "name" | "n" => {
+                self.edit_profile(EditCommand::Name, message, rest).await?;
+            }
+            "display_name" | "display" | "d" => {
+                self.edit_profile(EditCommand::DisplayName, message, rest)
+                    .await?;
+            }
+            "avatar" | "pfp" | "a" => {
+                self.edit_profile(EditCommand::Avatar, message, rest)
+                    .await?;
+            }
+            "colour" | "color" | "c" => {
+                self.edit_profile(EditCommand::Colour, message, rest)
+                    .await?;
+            }
+            "delete" => {
+                self.delete_profile(message, rest).await?;
+            }
+            "list" => {
+                self.list_profiles(message).await?;
+            }
+            "author" => {
+                let Some(reply_id) = message.replies.as_ref().and_then(|r| r.first()) else {
+                    return Ok(());
+                };
+                let content = match self.db.get_author(reply_id).await? {
+                    Some(author) => {
+                        format!("<\\@{}>", author.user_id)
+                    }
+                    None => "Unknown".to_string(),
+                };
+                let send = SendableMessage::new()
+                    .content(content)
+                    .reply(message.id.clone());
+                self.http.send_message(&message.channel_id, send).await?;
+            }
+            _ => {
+                let send = SendableMessage::new()
+                    .content(HELP_MESSAGE.to_string())
+                    .reply(message.id.clone());
+                self.http.send_message(&message.channel_id, send).await?;
+            }
+        };
+
+        Ok(())
+    }
+
+    async fn on_message_error(&self, message: &Message, error: Error) {
+        let send = match error {
+            Error::BotMissing(permission)
+            | Error::Http(HttpError::Api(ApiError::MissingPermission { permission })) => {
+                let content = format!("I don't have `{permission}` permission.");
+                if permission == Permission::SendMessage {
+                    let dm = match self.cache.fetch_dm(&self.http, &message.author_id).await {
+                        Ok(dm) => dm,
+                        Err(e) => {
+                            log::error!("Opening DM for {}\n{e:?}", &message.author_id);
+                            return;
+                        }
+                    };
+                    if let Err(e) = self.http.send_message(dm.id(), content).await {
+                        log::error!("Sending DM to {}\n{e:?}", &message.author_id);
+                    }
+                    return;
+                }
+                content
+            }
+            Error::UserMissing(perm) => format!("You don't have `{perm}` permission."),
+            Error::Http(e) => {
+                log::error!("on_message_error:\n{message:?}\n{e:?}");
+                return;
+            }
+            Error::Mongo(e) => {
+                log::error!("on_message_error:\n{message:?}\n{e:?}");
+                return;
+            }
+            Error::Validate(e) => {
+                log::debug!("on_message_error:validate:\n{message:?}\n{e:?}");
+                let mut send = String::new();
+                for (field, errors) in e.field_errors() {
+                    for error in errors {
+                        send.push_str(field);
+                        send.push(' ');
+                        send.push_str(error.message.as_ref().unwrap_or(&error.code));
+                        send.push('\n');
+                    }
+                }
+                send
+            }
+        };
+        if let Err(e) = self.http.send_message(&message.channel_id, send).await {
+            log::error!("on_message_error:send_message:\n{message:?}\n{e:?}");
+        }
+    }
+
+    async fn on_react(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        user_id: &str,
+        emoji_id: &str,
+        _action: RoleReact,
+    ) -> Result<(), Error> {
+        let message = self
+            .cache
+            .fetch_message(&self.http, channel_id, message_id)
+            .await?;
+        if message.author_id != self.cache.user_id() {
+            return Ok(());
+        }
+        if message.interactions.is_none() {
+            return Ok(());
+        }
+
+        let Some(reply_id) = message.replies.as_ref().and_then(|r| r.first()) else {
+            return Ok(());
+        };
+        let reply = self
+            .cache
+            .fetch_message(&self.http, channel_id, reply_id)
+            .await?;
+        if reply.author_id != user_id {
+            return Ok(());
+        }
+
+        let Some(content) = &message.content else {
+            return Ok(());
+        };
+
+        let data = get_data(content);
+        match data.get("T").copied() {
+            Some("L") => {
+                self.on_listing_react(&message, &reply, data, emoji_id)
+                    .await?;
+            }
+            Some(_) | None => {}
+        }
+
+        Ok(())
+    }
+
+    async fn on_react_error(&self, error: Error) {
+        log::error!("on_react_error:\n{error:?}");
+    }
+}
+
+#[async_trait]
+impl RawHandler for Bot {
+    async fn on_ready(
+        &self,
+        _users: Vec<User>,
+        _servers: Vec<Server>,
+        _channels: Vec<Channel>,
+        _members: Vec<Member>,
+        _emojis: Vec<Emoji>,
+    ) {
+        println!("Ready as {}", self.cache.user().await.username);
+
+        let user = self.cache.user().await;
+        if !user
+            .status
+            .is_some_and(|s| s.text.as_deref() == Some("Mention Me!"))
+        {
+            let edit = UserEdit::new().status_text("Mention Me!");
+            if let Err(e) = self.http.edit_user(self.cache.user_id(), edit).await {
+                log::error!("on_ready:edit_user:\n{e:?}");
+            }
+        }
+    }
+
+    async fn on_message(&self, message: Message) {
+        if let Err(e) = self.on_message(&message).await {
+            self.on_message_error(&message, e).await;
+        }
+    }
+
+    async fn on_message_react(
+        &self,
+        id: String,
+        channel_id: String,
+        user_id: String,
+        emoji_id: String,
+    ) {
+        if let Err(e) = self
+            .on_react(&channel_id, &id, &user_id, &emoji_id, RoleReact::React)
+            .await
+        {
+            self.on_react_error(e).await;
+        }
+    }
+
+    async fn on_message_unreact(
+        &self,
+        id: String,
+        channel_id: String,
+        user_id: String,
+        emoji_id: String,
+    ) {
+        if let Err(e) = self
+            .on_react(&channel_id, &id, &user_id, &emoji_id, RoleReact::Unreact)
+            .await
+        {
+            self.on_react_error(e).await;
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().unwrap();
+    env_logger::init();
+    let db = {
+        let uri = std::env::var("MONGO_URI").expect("Missing Env Variable: MONGO_URI");
+        let db_name = std::env::var("MONGO_DB_NAME").expect("Missing Env Variable: MONGO_DB_NAME");
+        let authors_col =
+            std::env::var("MONGO_AUTHORS_COL").expect("Missing Env Variable: MONGO_AUTHORS_COL");
+        let profiles_col =
+            std::env::var("MONGO_PROFILES_COL").expect("Missing Env Variable: MONGO_PROFILES_COL");
+        DB::new(&uri, &db_name, &authors_col, &profiles_col)
+            .await
+            .unwrap()
+    };
+
+    let token = std::env::var("BOT_TOKEN").expect("Missing Env Variable: BOT_TOKEN");
+    let http = Http::new(&token, true);
+    let ws = WebSocket::connect(&token).await;
+    let cache = Cache::new();
+
+    let bot = Bot {
+        http,
+        cache: cache.clone(),
+        db,
+    };
+    let handler = Arc::new(bot);
+
+    loop {
+        let event = ws.next().await;
+        cache.update(event.clone()).await;
+        let h = handler.clone();
+        tokio::spawn(async move {
+            h.on_event(event).await;
+        });
+    }
+}
+
+fn get_data(mut text: &str) -> HashMap<&str, &str> {
+    let mut data = HashMap::new();
+    while let Some(stripped) = text.strip_prefix("[](") {
+        let Some((kv, rest)) = stripped.split_once(')') else {
+            break;
+        };
+        let Some((key, value)) = kv.split_once(':') else {
+            break;
+        };
+        data.insert(key, value);
+        text = rest;
+    }
+    data
+}

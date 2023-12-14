@@ -67,28 +67,47 @@ impl Bot {
         Ok(message)
     }
 
-    async fn extract_masq_message(
+    async fn extract_masq_messages(
         &self,
         message: &Message,
-    ) -> Result<Option<SendableMessage>, Error> {
+    ) -> Result<Vec<SendableMessage>, Error> {
         let Some(content) = &message.content else {
-            return Ok(None);
-        };
-        let Some((name, rest)) = content.split_once(';').map(|(n, r)| (n, r.trim_start())) else {
-            return Ok(None);
-        };
-        let Some(mut profile) = self.db.get_profile(&message.author_id, name).await else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
 
-        self.check_profile(&message.channel_id, &message.author_id, &mut profile)
-            .await?;
+        let mut sendables = Vec::new();
+        let mut push = |c: (Profile, String)| {
+            let mut send = SendableMessage::new().content(c.1).masquerade(c.0);
+            if message.replies.is_some() && sendables.is_empty() {
+                send = send.replies(message.replies.clone().unwrap_or_default());
+            }
+            sendables.push(send);
+        };
+        let mut current: Option<(Profile, String)> = None;
+        for line in content.lines() {
+            if let Some((name, rest)) = line.split_once(';').map(|(n, r)| (n, r.trim_start())) {
+                if let Some(mut profile) = self.db.get_profile(&message.author_id, name).await {
+                    self.check_profile(&message.channel_id, &message.author_id, &mut profile)
+                        .await?;
+                    if let Some(c) = current {
+                        push(c);
+                    }
+                    current = Some((profile, rest.to_string()));
+                    continue;
+                }
+            }
+            if let Some(c) = &mut current {
+                c.1.push('\n');
+                c.1.push_str(line);
+            } else {
+                return Ok(Vec::new());
+            }
+        }
+        if let Some(c) = current {
+            push(c);
+        }
 
-        let send = SendableMessage::new()
-            .content(rest)
-            .masquerade(profile)
-            .replies(message.replies.clone().unwrap_or_default());
-        Ok(Some(send))
+        Ok(sendables)
     }
 
     async fn on_message(&self, message: &Message) -> Result<(), Error> {
@@ -96,9 +115,9 @@ impl Bot {
             return Ok(());
         }
 
-        if let Some(send) = self.extract_masq_message(message).await? {
-            let send = self.send_masq(&message.author_id, &message.channel_id, send);
-            let delete = async {
+        let sendables = self.extract_masq_messages(message).await?;
+        if !sendables.is_empty() {
+            let mut delete = Some(async {
                 if let Ok(permissions) = self
                     .cache
                     .fetch_channel_permissions(
@@ -115,8 +134,17 @@ impl Bot {
                             .await;
                     }
                 }
-            };
-            let (_, _) = join!(send, delete);
+            });
+
+            for send in sendables.into_iter().take(10) {
+                let send = self.send_masq(&message.author_id, &message.channel_id, send);
+                if let Some(delete) = delete.take() {
+                    let (result, _) = join!(send, delete);
+                    result?;
+                } else {
+                    send.await?;
+                }
+            }
             return Ok(());
         }
 

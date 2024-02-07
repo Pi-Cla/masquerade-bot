@@ -15,8 +15,10 @@ To remove a field
 ## Info
 `@Masquerade author` reply to a message to get original author
 ## Permissions
+-Required 
 `Masquerade` users will also need this.
-`ManageMessages` if you want the bot to delete the original message.
-`ManageRoles` to allow the bot to set masquerade colour.
+-Optional
+`ManageMessages` to delete the original message.
+`ManageRoles` to set masquerade colour.
 
 [Support Server](https://rvlt.gg/SPMxwwC8)";

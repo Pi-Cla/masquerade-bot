@@ -1,5 +1,7 @@
 use std::{collections::HashMap, fmt::Write};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use volty::{
     http::routes::channels::message_send::SendableMessage,
     types::channels::message::{Interactions, Message},
@@ -10,6 +12,8 @@ use crate::{models::Profile, Bot, Error};
 pub const PER_PAGE: usize = 5;
 
 pub fn get_page(profiles: &[Profile], page: usize) -> String {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^(#[a-f0-9]{6}|[a-z]+)$").unwrap());
+
     let last_page = (profiles.len().max(1) - 1) / PER_PAGE;
     let mut text = format!(
         "[](T:L)[](P:{page}){}/{}\n| Name | Display Name | Avatar | Colour |\n|-|-|-|-|",
@@ -24,10 +28,20 @@ pub fn get_page(profiles: &[Profile], page: usize) -> String {
     }
 
     for p in &profiles[start..end] {
+        if p.colour.as_ref().is_some_and(|c| RE.is_match(c)) {
+            let colour = p.colour.as_deref().unwrap();
+            write!(
+                &mut text,
+                "\n|$\\color{{{}}}\\textsf{{{}}}$",
+                colour, p.name
+            )
+            .unwrap();
+        } else {
+            write!(&mut text, "\n|{}", p.name).unwrap();
+        }
         write!(
             &mut text,
-            "\n|{}|{}|{}|{}|",
-            p.name,
+            "|{}|{}|{}|",
             p.display_name.as_deref().unwrap_or(""),
             p.avatar
                 .as_ref()

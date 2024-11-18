@@ -301,12 +301,9 @@ impl Bot {
         };
 
         let data = get_data(content);
-        match data.get("T").copied() {
-            Some("L") => {
-                self.on_listing_react(&message, &reply, data, emoji_id)
-                    .await?;
-            }
-            Some(_) | None => {}
+        if let Some("L") = data.get("T").copied() {
+            self.on_listing_react(&message, &reply, data, emoji_id)
+                .await?;
         }
 
         Ok(())

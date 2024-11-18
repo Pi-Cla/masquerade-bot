@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use futures::stream::TryStreamExt;
 use mongodb::{
     bson::{doc, to_document},
-    options::{ClientOptions, UpdateOptions},
+    options::ClientOptions,
     Client, Collection,
 };
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,7 @@ impl DB {
         let profiles_col = db.collection::<ProfileDoc>(profiles_col);
         let mut user_profiles: HashMap<String, HashMap<String, Profile>> = HashMap::new();
 
-        let mut cursor = profiles_col.find(doc! {}, None).await?;
+        let mut cursor = profiles_col.find(doc! {}).await?;
         while let Some(profile_doc) = cursor.try_next().await? {
             let profile: Profile = profile_doc.into();
             if !user_profiles.contains_key(&profile.user_id) {
@@ -140,10 +140,7 @@ impl DB {
     ) -> Result<Option<Profile>, Error> {
         let mut user_profiles = self.user_profiles.write().await;
         self.profiles_col
-            .delete_one(
-                doc! {"_id": {"name": profile_name, "user_id": user_id}},
-                None,
-            )
+            .delete_one(doc! {"_id": {"name": profile_name, "user_id": user_id}})
             .await?;
         if let Some(profiles) = user_profiles.get_mut(user_id) {
             let maybe_profile = profiles.remove(profile_name);
@@ -162,9 +159,9 @@ impl DB {
         let filter = doc! {"_id": to_document(&profile_doc._id).unwrap()};
         let mut update = doc! {"$set": to_document(&profile_doc).unwrap()};
         update.remove("_id");
-        let options = UpdateOptions::builder().upsert(true).build();
         self.profiles_col
-            .update_one(filter, update, Some(options))
+            .update_one(filter, update)
+            .upsert(true)
             .await?;
         user_profiles
             .entry(user_id.to_string())
@@ -174,16 +171,13 @@ impl DB {
     }
 
     pub async fn get_author(&self, message_id: &str) -> Result<Option<Author>, Error> {
-        let maybe_doc = self
-            .authors_col
-            .find_one(doc! {"_id": message_id}, None)
-            .await?;
+        let maybe_doc = self.authors_col.find_one(doc! {"_id": message_id}).await?;
         Ok(maybe_doc.map(|doc| doc.into()))
     }
 
     pub async fn set_author(&self, author: Author) -> Result<(), Error> {
         let author_doc: AuthorDoc = author.into();
-        self.authors_col.insert_one(author_doc, None).await?;
+        self.authors_col.insert_one(author_doc).await?;
         Ok(())
     }
 }

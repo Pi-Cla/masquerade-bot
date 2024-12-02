@@ -5,13 +5,15 @@ use volty::{http::routes::users::user_edit::UserEdit, prelude::*};
 
 mod constants;
 mod database;
+mod defaults;
 mod error;
+mod import;
 mod listing;
 mod models;
 mod profiles;
 
 use constants::HELP_MESSAGE;
-use database::{DefaultProfileDocId, DB};
+use database::DB;
 pub use error::Error;
 use models::{Author, Profile};
 use profiles::EditCommand;
@@ -21,6 +23,7 @@ struct Bot {
     cache: Cache,
 
     db: DB,
+    requests: reqwest::Client,
 }
 
 impl Bot {
@@ -217,53 +220,10 @@ impl Bot {
                 self.http.send_message(&message.channel_id, send).await?;
             }
             "default" | "server_default" | "sdefault" | "channel_default" | "cdefault" => {
-                let user_id = message.author_id.clone();
-
-                let id = match command {
-                    "default" => DefaultProfileDocId::Global { user_id },
-                    "server_default" | "sdefault" => {
-                        let channel = self.cache.get_channel(&message.channel_id).await.unwrap();
-                        let Some(server_id) = channel.server_id() else {
-                            let send = SendableMessage::new()
-                                .content("Not in a server!")
-                                .reply(message.id.clone());
-                            self.http.send_message(&message.channel_id, send).await?;
-                            return Ok(());
-                        };
-                        DefaultProfileDocId::Server {
-                            user_id,
-                            server_id: server_id.to_string(),
-                        }
-                    }
-                    "channel_default" | "cdefault" => DefaultProfileDocId::Channel {
-                        user_id,
-                        channel_id: message.channel_id.clone(),
-                    },
-                    _ => unreachable!(),
-                };
-                let name = rest.split_whitespace().next();
-                let Some(name) = name else {
-                    self.db.set_default(id, name).await?;
-                    let send = SendableMessage::new()
-                        .content("Success!")
-                        .reply(message.id.clone());
-                    self.http.send_message(&message.channel_id, send).await?;
-                    return Ok(());
-                };
-                let Some(profile) = self.db.get_profile(&message.author_id, name).await else {
-                    let send = SendableMessage::new()
-                        .content("Profile doesn't exist!")
-                        .reply(message.id.clone());
-                    self.http.send_message(&message.channel_id, send).await?;
-                    return Ok(());
-                };
-                self.db.set_default(id, Some(name)).await?;
-                let send = SendableMessage::new()
-                    .content("Success!")
-                    .masquerade(profile)
-                    .reply(message.id.clone());
-                self.send_masq(&message.author_id, &message.channel_id, send)
-                    .await?;
+                self.default_command(message, command, rest).await?;
+            }
+            "import" => {
+                self.import_command(message, rest).await?;
             }
             _ => {
                 let bot_user = self.cache.user().await;
@@ -444,6 +404,7 @@ async fn main() {
             .await
             .unwrap()
     };
+    let requests = reqwest::Client::new();
 
     let token = std::env::var("BOT_TOKEN").expect("Missing Env Variable: BOT_TOKEN");
     let http = Http::new(&token, true);
@@ -454,6 +415,7 @@ async fn main() {
         http,
         cache: cache.clone(),
         db,
+        requests,
     };
     let handler = Arc::new(bot);
 

@@ -258,6 +258,7 @@ impl Bot {
                 content
             }
             Error::UserMissing(perm) => format!("You don't have `{perm}` permission."),
+            Error::UserMaxProfiles(max) => format!("Max profiles reached ({max})"),
             Error::Http(e) => {
                 log::error!("on_message_error:\n{message:?}\n{e:?}");
                 return;

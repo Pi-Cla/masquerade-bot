@@ -4,6 +4,7 @@ use volty::prelude::*;
 pub enum Error {
     BotMissing(Permission),
     UserMissing(Permission),
+    UserMaxProfiles(u32),
 
     Http(HttpError),
     Mongo(mongodb::error::Error),

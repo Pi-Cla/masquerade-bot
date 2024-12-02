@@ -182,6 +182,11 @@ impl DB {
     pub async fn save_profile(&self, user_id: &str, profile: Profile) -> Result<(), Error> {
         profile.validate()?;
         let mut user_profiles = self.user_profiles.write().await;
+        let profiles = user_profiles.entry(user_id.to_string()).or_default();
+        if !profiles.contains_key(&profile.name) && profiles.len() >= 256 {
+            return Err(Error::UserMaxProfiles(256));
+        }
+
         let profile_doc: ProfileDoc = profile.clone().into();
         let filter = doc! {"_id": to_document(&profile_doc._id).unwrap()};
         let mut update = doc! {"$set": to_document(&profile_doc).unwrap()};
@@ -190,10 +195,7 @@ impl DB {
             .update_one(filter, update)
             .upsert(true)
             .await?;
-        user_profiles
-            .entry(user_id.to_string())
-            .or_default()
-            .insert(profile.name.clone(), profile);
+        profiles.insert(profile.name.clone(), profile);
         Ok(())
     }
 

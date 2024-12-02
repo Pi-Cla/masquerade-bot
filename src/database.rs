@@ -66,6 +66,7 @@ impl From<Profile> for ProfileDoc {
         }
     }
 }
+
 impl From<ProfileDoc> for Profile {
     fn from(value: ProfileDoc) -> Self {
         Self {
@@ -78,10 +79,25 @@ impl From<ProfileDoc> for Profile {
     }
 }
 
+#[derive(PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum DefaultProfileDocId {
+    Global { user_id: String },
+    Server { user_id: String, server_id: String },
+    Channel { user_id: String, channel_id: String },
+}
+
+#[derive(Deserialize, Serialize)]
+struct DefaultProfileDoc {
+    _id: DefaultProfileDocId,
+    name: String,
+}
+
 pub struct DB {
     authors_col: Collection<AuthorDoc>,
     profiles_col: Collection<ProfileDoc>,
+    defaults_col: Collection<DefaultProfileDoc>,
     user_profiles: RwLock<HashMap<String, HashMap<String, Profile>>>,
+    user_defaults: RwLock<HashMap<DefaultProfileDocId, String>>,
 }
 
 impl DB {
@@ -90,6 +106,7 @@ impl DB {
         db_name: &str,
         authors_col: &str,
         profiles_col: &str,
+        defaults_col: &str,
     ) -> Result<DB, mongodb::error::Error> {
         let mut options = ClientOptions::parse(uri).await?;
         options.app_name = Some("MasqueradeBot".to_string());
@@ -97,7 +114,9 @@ impl DB {
         let db = client.database(db_name);
         let authors_col = db.collection(authors_col);
         let profiles_col = db.collection::<ProfileDoc>(profiles_col);
+        let defaults_col = db.collection::<DefaultProfileDoc>(defaults_col);
         let mut user_profiles: HashMap<String, HashMap<String, Profile>> = HashMap::new();
+        let mut user_defaults: HashMap<DefaultProfileDocId, String> = HashMap::new();
 
         let mut cursor = profiles_col.find(doc! {}).await?;
         while let Some(profile_doc) = cursor.try_next().await? {
@@ -110,10 +129,18 @@ impl DB {
                 .unwrap()
                 .insert(profile.name.clone(), profile);
         }
+
+        let mut cursor = defaults_col.find(doc! {}).await?;
+        while let Some(default_doc) = cursor.try_next().await? {
+            user_defaults.insert(default_doc._id, default_doc.name);
+        }
+
         Ok(Self {
             authors_col,
             profiles_col,
+            defaults_col,
             user_profiles: RwLock::new(user_profiles),
+            user_defaults: RwLock::new(user_defaults),
         })
     }
 
@@ -178,6 +205,68 @@ impl DB {
     pub async fn set_author(&self, author: Author) -> Result<(), Error> {
         let author_doc: AuthorDoc = author.into();
         self.authors_col.insert_one(author_doc).await?;
+        Ok(())
+    }
+
+    pub async fn get_default(
+        &self,
+        user_id: &str,
+        server_id: Option<&str>,
+        channel_id: &str,
+    ) -> Option<Profile> {
+        let user_id = user_id.to_string();
+        let user_defaults = self.user_defaults.read().await;
+        let users_profiles = self.user_profiles.read().await;
+        let user_profiles = users_profiles.get(&user_id)?;
+
+        let id = DefaultProfileDocId::Channel {
+            user_id: user_id.clone(),
+            channel_id: channel_id.to_string(),
+        };
+        if let Some(name) = user_defaults.get(&id) {
+            return user_profiles.get(name).cloned();
+        }
+
+        if let Some(server_id) = server_id {
+            let id = DefaultProfileDocId::Server {
+                user_id: user_id.clone(),
+                server_id: server_id.to_string(),
+            };
+            if let Some(name) = user_defaults.get(&id) {
+                return user_profiles.get(name).cloned();
+            }
+        }
+
+        let id = DefaultProfileDocId::Global { user_id };
+        if let Some(name) = user_defaults.get(&id) {
+            return user_profiles.get(name).cloned();
+        }
+
+        None
+    }
+
+    pub async fn set_default(
+        &self,
+        id: DefaultProfileDocId,
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let filter = doc! {"_id": to_document(&id).unwrap()};
+        let mut user_defaults = self.user_defaults.write().await;
+
+        let Some(name) = name else {
+            if user_defaults.remove(&id).is_none() {
+                return Ok(());
+            }
+            self.defaults_col.delete_one(filter).await?;
+            return Ok(());
+        };
+
+        let update = doc! {"$set": doc!{"name": &name}};
+        self.defaults_col
+            .update_one(filter, update)
+            .upsert(true)
+            .await?;
+        user_defaults.insert(id, name.to_string());
         Ok(())
     }
 }

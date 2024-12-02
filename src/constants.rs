@@ -1,21 +1,28 @@
 pub const HELP_MESSAGE: &str = "## Create
-`@Masquerade create {name} {display_name}`
+`@%DISPLAY_NAME% create {name} {display_name}`
 ## Use
 `name;Text you want to send.`
 ## Edit
-`@Masquerade display {name} {display_name}`
-`@Masquerade avatar {name} {url}`
-`@Masquerade colour {name} {colour}`
+`@%DISPLAY_NAME% display {name} {display_name}`
+`@%DISPLAY_NAME% avatar {name} {url}`
+`@%DISPLAY_NAME% colour {name} {colour}`
 To remove a field
-`@Masquerade display {name} clear`
+`@%DISPLAY_NAME% display {name} clear`
 ## Delete
-`@Masquerade delete {name}`
+`@%DISPLAY_NAME% delete {name}`
 ## List
-`@Masquerade list`
+`@%DISPLAY_NAME% list`
 ## Info
-`@Masquerade author` reply to a message to get original author
+`@%DISPLAY_NAME% author` reply to a message to get original author
+## Default
+Messages sent without a prefix will use your default profile if set.
+`@%DISPLAY_NAME% default {name}` set a global default profile
+`@%DISPLAY_NAME% server_default {name}` set a server default profile
+`@%DISPLAY_NAME% channel_default {name}` set a channel default profile
+To remove defaults use the same command but without a name
+`@%DISPLAY_NAME% default` remove global default profile
 ## Permissions
--Required 
+-Required
 `Masquerade` users will also need this.
 -Optional
 `ManageMessages` to delete the original message.

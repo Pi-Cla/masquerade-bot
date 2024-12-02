@@ -11,7 +11,7 @@ mod models;
 mod profiles;
 
 use constants::HELP_MESSAGE;
-use database::DB;
+use database::{DefaultProfileDocId, DB};
 pub use error::Error;
 use models::{Author, Profile};
 use profiles::EditCommand;
@@ -74,6 +74,15 @@ impl Bot {
         let Some(content) = &message.content else {
             return Ok(Vec::new());
         };
+        if content.starts_with(self.cache.user_mention()) {
+            return Ok(Vec::new());
+        }
+
+        let user_id = &message.author_id;
+        let channel_id = &message.channel_id;
+        let channel = self.cache.get_channel(channel_id).await.unwrap();
+        let server_id = channel.server_id();
+        let mut default = self.db.get_default(user_id, server_id, channel_id).await;
 
         let mut sendables = Vec::new();
         let mut push = |c: (Profile, String)| {
@@ -99,6 +108,8 @@ impl Bot {
             if let Some(c) = &mut current {
                 c.1.push('\n');
                 c.1.push_str(line);
+            } else if let Some(default) = default.take() {
+                current = Some((default, line.to_string()));
             } else {
                 return Ok(Vec::new());
             }
@@ -118,21 +129,18 @@ impl Bot {
         let sendables = self.extract_masq_messages(message).await?;
         if !sendables.is_empty() {
             let mut delete = Some(async {
-                if let Ok(permissions) = self
+                let channel_id = &message.channel_id;
+                let user_id = self.cache.user_id();
+                if self
                     .cache
-                    .fetch_channel_permissions(
-                        &self.http,
-                        &message.channel_id,
-                        self.cache.user_id(),
-                    )
+                    .fetch_channel_permissions(&self.http, channel_id, user_id)
                     .await
+                    .is_ok_and(|p| p.has(Permission::ManageMessages))
                 {
-                    if permissions.has(Permission::ManageMessages) {
-                        let _ = self
-                            .http
-                            .delete_message(&message.channel_id, &message.id)
-                            .await;
-                    }
+                    let _ = self
+                        .http
+                        .delete_message(&message.channel_id, &message.id)
+                        .await;
                 }
             });
 
@@ -208,9 +216,59 @@ impl Bot {
                     .reply(message.id.clone());
                 self.http.send_message(&message.channel_id, send).await?;
             }
-            _ => {
+            "default" | "server_default" | "sdefault" | "channel_default" | "cdefault" => {
+                let user_id = message.author_id.clone();
+
+                let id = match command {
+                    "default" => DefaultProfileDocId::Global { user_id },
+                    "server_default" | "sdefault" => {
+                        let channel = self.cache.get_channel(&message.channel_id).await.unwrap();
+                        let Some(server_id) = channel.server_id() else {
+                            let send = SendableMessage::new()
+                                .content("Not in a server!")
+                                .reply(message.id.clone());
+                            self.http.send_message(&message.channel_id, send).await?;
+                            return Ok(());
+                        };
+                        DefaultProfileDocId::Server {
+                            user_id,
+                            server_id: server_id.to_string(),
+                        }
+                    }
+                    "channel_default" | "cdefault" => DefaultProfileDocId::Channel {
+                        user_id,
+                        channel_id: message.channel_id.clone(),
+                    },
+                    _ => unreachable!(),
+                };
+                let name = rest.split_whitespace().next();
+                let Some(name) = name else {
+                    self.db.set_default(id, name).await?;
+                    let send = SendableMessage::new()
+                        .content("Success!")
+                        .reply(message.id.clone());
+                    self.http.send_message(&message.channel_id, send).await?;
+                    return Ok(());
+                };
+                let Some(profile) = self.db.get_profile(&message.author_id, name).await else {
+                    let send = SendableMessage::new()
+                        .content("Profile doesn't exist!")
+                        .reply(message.id.clone());
+                    self.http.send_message(&message.channel_id, send).await?;
+                    return Ok(());
+                };
+                self.db.set_default(id, Some(name)).await?;
                 let send = SendableMessage::new()
-                    .content(HELP_MESSAGE.to_string())
+                    .content("Success!")
+                    .masquerade(profile)
+                    .reply(message.id.clone());
+                self.send_masq(&message.author_id, &message.channel_id, send)
+                    .await?;
+            }
+            _ => {
+                let bot_user = self.cache.user().await;
+                let send = SendableMessage::new()
+                    .content(HELP_MESSAGE.replace("%DISPLAY_NAME%", &bot_user.username))
                     .reply(message.id.clone());
                 self.http.send_message(&message.channel_id, send).await?;
             }
@@ -327,9 +385,9 @@ impl RawHandler for Bot {
         println!("Ready as {}", self.cache.user().await.username);
 
         let user = self.cache.user().await;
-        if !user
+        if user
             .status
-            .is_some_and(|s| s.text.as_deref() == Some("Mention Me!"))
+            .is_none_or(|s| s.text.as_deref() != Some("Mention Me!"))
         {
             let edit = UserEdit::new().status_text("Mention Me!");
             if let Err(e) = self.http.edit_user(self.cache.user_id(), edit).await {
@@ -380,7 +438,9 @@ async fn main() {
             std::env::var("MONGO_AUTHORS_COL").expect("Missing Env Variable: MONGO_AUTHORS_COL");
         let profiles_col =
             std::env::var("MONGO_PROFILES_COL").expect("Missing Env Variable: MONGO_PROFILES_COL");
-        DB::new(&uri, &db_name, &authors_col, &profiles_col)
+        let defaults_col =
+            std::env::var("MONGO_DEFAULTS_COL").expect("Missing Env Variable: MONGO_DEFAULTS_COL");
+        DB::new(&uri, &db_name, &authors_col, &profiles_col, &defaults_col)
             .await
             .unwrap()
     };

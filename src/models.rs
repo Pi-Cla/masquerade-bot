@@ -14,27 +14,23 @@ pub struct Author {
 pub struct Profile {
     pub user_id: String,
     #[validate(
-        length(min = 1, message = "cannot be empty"),
-        length(max = 32, message = "must be <= 32 characters"),
-        regex(path = "RE_USERNAME", message = "contains invalid characters")
+        length(min = 1, max = 32, message = "must be <= 32 characters"),
+        regex(path = *RE_USERNAME, message = "contains invalid characters")
     )]
     pub name: String,
     #[validate(
-        length(min = 1, message = "cannot be empty"),
-        length(max = 32, message = "must be <= 32 characters"),
-        regex(path = "RE_DISPLAY_NAME", message = "contains invalid characters")
+        length(min = 1, max = 32, message = "must be <= 32 characters"),
+        regex(path = *RE_DISPLAY_NAME, message = "contains invalid characters")
     )]
     pub display_name: Option<String>,
     #[validate(
-        length(min = 1, message = "cannot be empty"),
-        length(max = 256, message = "must be <= 256 characters"),
+        length(min = 1, max = 128, message = "must be <= 128 characters"),
         url(message = "isn't a valid url")
     )]
     pub avatar: Option<String>,
     #[validate(
-        length(min = 1, message = "cannot be empty"),
-        length(max = 128, message = "must be <= 128 characters"),
-        regex(path = "RE_COLOUR", message = "not supported")
+        length(min = 1, max = 128, message = "must be <= 128 characters"),
+        regex(path = *RE_COLOUR, message = "not supported")
     )]
     pub colour: Option<String>,
 }

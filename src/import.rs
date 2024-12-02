@@ -61,13 +61,21 @@ impl Bot {
                     .await?;
                 return Ok(());
             };
-            let Ok(export) = response.json().await else {
+            let Ok(text) = response.text().await else {
                 self.http
                     .send_message(&message.channel_id, "Failed to download file!")
                     .await?;
                 return Ok(());
             };
-            export
+            match serde_json::from_str(&text) {
+                Ok(export) => export,
+                Err(e) => {
+                    self.http
+                        .send_message(&message.channel_id, format!("Failed to parse file!\n{e}"))
+                        .await?;
+                    return Ok(());
+                }
+            }
         };
         let profiles = export.into_profiles(&message.author_id)?;
         let count = profiles.len();

@@ -1362,6 +1362,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.9",
  "serde",
+ "serde_json",
  "tokio",
  "validator 0.19.0",
  "volty",

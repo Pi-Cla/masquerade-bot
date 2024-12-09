@@ -327,9 +327,9 @@ impl RawHandler for Bot {
         println!("Ready as {}", self.cache.user().await.username);
 
         let user = self.cache.user().await;
-        if !user
+        if user
             .status
-            .is_some_and(|s| s.text.as_deref() == Some("Mention Me!"))
+            .is_none_or(|s| s.text.as_deref() != Some("Mention Me!"))
         {
             let edit = UserEdit::new().status_text("Mention Me!");
             if let Err(e) = self.http.edit_user(self.cache.user_id(), edit).await {

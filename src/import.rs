@@ -26,7 +26,7 @@ impl PluralKitExport {
                 name: m.name,
                 display_name: m.display_name,
                 avatar: m.avatar_url,
-                colour: m.color,
+                colour: m.color.map(|c| format!("#{c}")),
             })
             .collect();
         if let Some(e) = profiles.iter().find_map(|p| p.validate().err()) {
